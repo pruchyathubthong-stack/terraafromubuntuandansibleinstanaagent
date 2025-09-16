@@ -1,0 +1,103 @@
+---
+- name: Install and Configure Instana Agent (Static) on Ubuntu
+  hosts: all
+  become: true
+
+  vars:
+    instana_agent_tar: "instana-agent-linux-64bit.tar.gz"
+    instana_agent_src_path: "/tmp"        # path บน controller ที่เก็บ tar.gz
+    instana_agent_dir: "/opt/instana"
+    instana_log_dir: "/var/log/instana"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+    java_max_mem: "512m"
+    agent_key: "r29pQwIIbOTA0LdGZIqrfX"
+    download_key: "LKtV82JJQjSn2rMrIsuMww"
+    endpoint_host: "10.200.124.215"
+    endpoint_port: "1444"
+
+  tasks:
+    - name: Ensure required packages are installed
+      apt:
+        name: openjdk-11-jdk
+        state: present
+        update_cache: yes
+
+    - name: Verify Java installation
+      command: "{{ java_home }}/bin/java -version"
+      register: java_version
+      ignore_errors: yes
+
+    - name: Ensure Instana Agent folder exists
+      file:
+        path: "{{ instana_agent_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ensure Instana Agent log folder exists
+      file:
+        path: "{{ instana_log_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Instana Agent tar.gz from controller to target
+      copy:
+        src: "{{ instana_agent_src_path }}/{{ instana_agent_tar }}"
+        dest: "/tmp/{{ instana_agent_tar }}"
+        mode: '0644'
+
+    - name: Extract Instana Agent
+      unarchive:
+        src: "/tmp/{{ instana_agent_tar }}"
+        dest: "{{ instana_agent_dir }}"
+        remote_src: yes
+        extra_opts: [--strip-components=1]
+
+    - name: Create Instana environment file (systemd compatible)
+      copy:
+        dest: "{{ instana_agent_dir }}/env.sh"
+        content: |
+          JAVA_HOME={{ java_home }}
+          JAVA_MAX_MEM={{ java_max_mem }}
+          PATH={{ java_home }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          AGENT_KEY={{ agent_key }}
+          DOWNLOAD_KEY={{ download_key }}
+          ENDPOINT_HOST={{ endpoint_host }}
+          ENDPOINT_PORT={{ endpoint_port }}
+        mode: '0644'
+
+    - name: Create systemd unit file for Instana Agent
+      copy:
+        dest: /etc/systemd/system/instana-agent.service
+        content: |
+          [Unit]
+          Description=Instana Agent
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStart={{ instana_agent_dir }}/bin/start
+          ExecStop={{ instana_agent_dir }}/bin/stop
+          EnvironmentFile={{ instana_agent_dir }}/env.sh
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd to recognize unit file changes
+      command: systemctl daemon-reload
+
+    - name: Enable and start Instana Agent
+      systemd:
+        name: instana-agent
+        enabled: yes
+        state: started
+
+    - name: Wait until Instana Agent is active
+      command: systemctl is-active instana-agent
+      register: instana_status
+      retries: 10
+      delay: 10
+      until: instana_status.stdout == "active"
+
